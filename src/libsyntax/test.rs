@@ -320,15 +320,8 @@ fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
 
     fn has_test_signature(i: &ast::Item) -> HasTestSignature {
         match i.node {
-          ast::ItemKind::Fn(ref decl, _, _, _, ref generics, _) => {
-            let no_output = match decl.output {
-                ast::FunctionRetTy::Default(..) => true,
-                ast::FunctionRetTy::Ty(ref t) if t.node == ast::TyKind::Tup(vec![]) => true,
-                _ => false
-            };
-            if decl.inputs.is_empty()
-                   && no_output
-                   && !generics.is_parameterized() {
+          ast::ItemKind::Fn(ref decl, _, _, _, _, _) => {
+            if decl.inputs.is_empty() {
                 Yes
             } else {
                 No
@@ -338,51 +331,47 @@ fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
         }
     }
 
-    if has_test_attr {
+    let has_test_signature = if has_test_attr {
         let diag = cx.span_diagnostic;
         match has_test_signature(i) {
-            Yes => {},
-            No => diag.span_err(i.span, "functions used as tests must have signature fn() -> ()"),
-            NotEvenAFunction => diag.span_err(i.span,
-                                              "only functions may be used as tests"),
+            Yes => true,
+            No => {
+                diag.span_err(i.span, "functions used as tests can not have any arguments");
+                false
+            },
+            NotEvenAFunction => {
+                diag.span_err(i.span, "only functions may be used as tests");
+                false
+            },
         }
-    }
+    } else {
+        false
+    };
 
-    has_test_attr && has_test_signature(i) == Yes
+    has_test_attr && has_test_signature
 }
 
 fn is_bench_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
     let has_bench_attr = attr::contains_name(&i.attrs, "bench");
 
-    fn has_test_signature(i: &ast::Item) -> bool {
+    fn has_bench_signature(i: &ast::Item) -> bool {
         match i.node {
-            ast::ItemKind::Fn(ref decl, _, _, _, ref generics, _) => {
-                let input_cnt = decl.inputs.len();
-                let no_output = match decl.output {
-                    ast::FunctionRetTy::Default(..) => true,
-                    ast::FunctionRetTy::Ty(ref t) if t.node == ast::TyKind::Tup(vec![]) => true,
-                    _ => false
-                };
-                let tparm_cnt = generics.params.iter()
-                    .filter(|param| param.is_type_param())
-                    .count();
-
-                // NB: inadequate check, but we're running
-                // well before resolve, can't get too deep.
-                input_cnt == 1
-                    && no_output && tparm_cnt == 0
+            ast::ItemKind::Fn(ref decl, _, _, _, _, _) => {
+                decl.inputs.len() == 1
             }
           _ => false
         }
     }
 
-    if has_bench_attr && !has_test_signature(i) {
+    let has_bench_signature = has_bench_signature(i);
+
+    if has_bench_attr && !has_bench_signature {
         let diag = cx.span_diagnostic;
         diag.span_err(i.span, "functions used as benches must have signature \
-                      `fn(&mut Bencher) -> ()`");
+                      `fn(&mut Bencher)`");
     }
 
-    has_bench_attr && has_test_signature(i)
+    has_bench_attr && has_bench_signature
 }
 
 fn is_ignored(i: &ast::Item) -> bool {
