@@ -807,7 +807,8 @@ pub fn phase_2_configure_and_expand<F>(sess: &Session,
                                          &mut resolver,
                                          sess.opts.test,
                                          krate,
-                                         sess.diagnostic())
+                                         sess.diagnostic(),
+                                         &sess.features)
     });
 
     // If we're actually rustdoc then there's no need to actually compile
