@@ -324,7 +324,7 @@ enum HasTestSignature {
 fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
     let has_test_attr = attr::contains_name(&i.attrs, "test");
 
-    fn has_test_signature(i: &ast::Item) -> HasTestSignature {
+    fn has_test_signature(cx: &TestCtxt, i: &ast::Item) -> HasTestSignature {
         match i.node {
             ast::ItemKind::Fn(ref decl, _, _, _, ref generics, _) => {
                 // If the termination trait is active, the compiler will check that the output
@@ -353,7 +353,7 @@ fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
 
     let has_test_signature = if has_test_attr {
         let diag = cx.span_diagnostic;
-        match has_test_signature(i) {
+        match has_test_signature(cx, i) {
             Yes => true,
             No => {
                 if cx.features.termination_trait {
@@ -378,11 +378,11 @@ fn is_test_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
 fn is_bench_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
     let has_bench_attr = attr::contains_name(&i.attrs, "bench");
 
-    fn has_bench_signature(i: &ast::Item) -> bool {
+    fn has_bench_signature(cx: &TestCtxt, i: &ast::Item) -> bool {
         match i.node {
             ast::ItemKind::Fn(ref decl, _, _, _, ref generics, _) => {
                 let input_cnt = decl.inputs.len();
-                
+
                 // If the termination trait is active, the compiler will check that the output
                 // type implements the `Termination` trait as `libtest` enforces that.
                 let output_matches = if cx.features.termination_trait {
@@ -402,13 +402,13 @@ fn is_bench_fn(cx: &TestCtxt, i: &ast::Item) -> bool {
 
                 // NB: inadequate check, but we're running
                 // well before resolve, can't get too deep.
-                input_cnt == 1 && output_matches 
+                input_cnt == 1 && output_matches
             }
           _ => false
         }
     }
 
-    let has_bench_signature = has_bench_signature(i);
+    let has_bench_signature = has_bench_signature(cx, i);
 
     if has_bench_attr && !has_bench_signature {
         let diag = cx.span_diagnostic;
@@ -657,14 +657,20 @@ fn mk_tests(cx: &TestCtxt) -> P<ast::Item> {
 fn mk_test_descs(cx: &TestCtxt) -> P<ast::Expr> {
     debug!("building test vector from {} tests", cx.testfns.len());
 
+    let (test_descs, _test_wrappers) = cx.testfns.iter().map(|test| {
+        mk_test_desc_and_fn_rec(cx, test)
+    }).fold((Vec::new(), Vec::new()), |(mut tdescs, mut twrappers), (tdesc, twrapper)| {
+        tdescs.push(tdesc);
+        twrappers.push(twrapper);
+        (tdescs, twrappers)
+    });
+
     P(ast::Expr {
         id: ast::DUMMY_NODE_ID,
         node: ast::ExprKind::AddrOf(ast::Mutability::Immutable,
             P(ast::Expr {
                 id: ast::DUMMY_NODE_ID,
-                node: ast::ExprKind::Array(cx.testfns.iter().map(|test| {
-                    mk_test_desc_and_fn_rec(cx, test)
-                }).collect()),
+                node: ast::ExprKind::Array(test_descs),
                 span: DUMMY_SP,
                 attrs: ast::ThinVec::new(),
             })),
@@ -681,26 +687,26 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
     debug!("encoding {}", path_name_i(&path[..]));
 
     // path to the #[test] function: "foo::bar::baz"
-    let path_string = path_name_i(&path[..]);
-    let test_fn_name = Symbol::intern(&path_string);
+    let test_fn_name = path_name_i(&path[..]);
 
     let fail_expr = match test.should_panic {
-        ShouldPanic::No => quote_expr!(ecx, self::test::ShouldPanic::No),
+        ShouldPanic::No => quote_tokens!(ecx, self::test::ShouldPanic::No),
         ShouldPanic::Yes(msg) => {
             match msg {
                 Some(msg) => {
-                    quote_expr!(ecx, self::test::ShouldPanic::YesWithMessage($msg))
+                    let msg = msg.as_str();
+                    quote_tokens!(ecx, self::test::ShouldPanic::YesWithMessage($msg))
                 }
-                None => quote_expr!(ecx, self::test::ShouldPanic::Yes)
+                None => quote_tokens!(ecx, self::test::ShouldPanic::Yes)
             }
         }
     };
 
-    let desc_expr = quote_expr!(ecx, self::test::TestDesc {
-        name: self::test::StaticTestName($test_fn_name),
-        ignore: $test.ignore,
+    let desc_expr = quote_item!(ecx, self::test::TestDesc {
+        name: self::test::TestName::StaticTestName($test_fn_name),
+        ignore: $(test.ignore),
         should_panic: $fail_expr,
-        allow_fail: $test.allow_fail,
+        allow_fail: $(test.allow_fail),
     });
 
     let mut visible_path = match cx.toplevel_reexport {
@@ -715,13 +721,13 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
     let fn_expr = ecx.expr_path(ecx.path_global(span, visible_path));
 
     let test_fn_wrapped = if cx.features.termination_trait {
-        quote_expr!(ecx, assert_eq!(0, $fn_expr().report());)
+        quote_tokens!(ecx, assert_eq!(0, $fn_expr().report()))
     } else {
-        quote_expr!(ecx, $fn_expr();)
+        quote_tokens!(ecx, $fn_expr())
     };
 
     let test_fn_wrapper_name = Ident::from_str(&format!("{}_wrapper", test_fn_name));
-    let test_fn_wrapper = quote_item!(ecx, fn $test_fn_wrapped_name {
+    let test_fn_wrapper = quote_item!(ecx, fn $test_fn_wrapper_name {
         $test_fn_wrapped
     });
 
@@ -731,5 +737,5 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
         testfn: $variant_name($test_fn_wrapper_name),
     });
 
-    (test_desc_and_fn, test_fn_wrapper)
+    (test_desc_and_fn, test_fn_wrapper.unwrap())
 }

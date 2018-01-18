@@ -25,6 +25,7 @@
 #![feature(match_default_bindings)]
 #![feature(i128_type)]
 #![feature(const_atomic_usize_new)]
+#![feature(quote)]
 
 // See librustc_cratesio_shim/Cargo.toml for a comment explaining this.
 #[allow(unused_extern_crates)]
@@ -104,6 +105,7 @@ pub mod syntax {
     pub use ext;
     pub use parse;
     pub use ast;
+    pub use tokenstream;
 }
 
 pub mod abi;
