@@ -690,19 +690,19 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
     let test_fn_name = path_name_i(&path[..]);
 
     let fail_expr = match test.should_panic {
-        ShouldPanic::No => quote_tokens!(ecx, self::test::ShouldPanic::No),
+        ShouldPanic::No => quote_expr!(ecx, self::test::ShouldPanic::No),
         ShouldPanic::Yes(msg) => {
             match msg {
                 Some(msg) => {
                     let msg = msg.as_str();
-                    quote_tokens!(ecx, self::test::ShouldPanic::YesWithMessage($msg))
+                    quote_expr!(ecx, self::test::ShouldPanic::YesWithMessage($msg))
                 }
-                None => quote_tokens!(ecx, self::test::ShouldPanic::Yes)
+                None => quote_expr!(ecx, self::test::ShouldPanic::Yes)
             }
         }
     };
 
-    let desc_expr = quote_item!(ecx, self::test::TestDesc {
+    let desc_expr = quote_expr!(ecx, self::test::TestDesc {
         name: self::test::TestName::StaticTestName($test_fn_name),
         ignore: $(test.ignore),
         should_panic: $fail_expr,
@@ -721,14 +721,14 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
     let fn_expr = ecx.expr_path(ecx.path_global(span, visible_path));
 
     let test_fn_wrapped = if cx.features.termination_trait {
-        quote_tokens!(ecx, assert_eq!(0, $fn_expr().report()))
+        quote_expr!(ecx, assert_eq!(0, $fn_expr().report()))
     } else {
-        quote_tokens!(ecx, $fn_expr())
+        quote_expr!(ecx, $fn_expr())
     };
 
     let test_fn_wrapper_name = Ident::from_str(&format!("{}_wrapper", test_fn_name));
-    let test_fn_wrapper = quote_item!(ecx, fn $test_fn_wrapper_name {
-        $test_fn_wrapped
+    let test_fn_wrapper = quote_item!(ecx, fn $test_fn_wrapper_name() {
+        $test_fn_wrapped;
     });
 
     let variant_name = Ident::from_str(if test.bench { "StaticBenchFn" } else { "StaticTestFn" });
@@ -737,5 +737,5 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
         testfn: $variant_name($test_fn_wrapper_name),
     });
 
-    (test_desc_and_fn, test_fn_wrapper.unwrap())
+    (test_desc_and_fn, test_fn_wrapper.expect("LAST UNWRAP"))
 }
