@@ -31,6 +31,7 @@ use ext::base::{ExtCtxt, Resolver};
 use ext::build::AstBuilder;
 use ext::expand::ExpansionConfig;
 use ext::hygiene::{Mark, SyntaxContext};
+use ext::quote::rt::ToTokens;
 use fold::Folder;
 use feature_gate::Features;
 use util::move_map::MoveMap;
@@ -40,6 +41,7 @@ use print::pprust;
 use ast::{self, Ident};
 use ptr::P;
 use symbol::{self, Symbol, keywords};
+use tokenstream::TokenTree;
 use util::small_vector::SmallVector;
 
 enum ShouldPanic {
@@ -561,18 +563,18 @@ fn mk_main(cx: &mut TestCtxt) -> P<ast::Item> {
 
 fn mk_test_module(cx: &mut TestCtxt) -> (P<ast::Item>, Option<P<ast::Item>>) {
     // Link to test crate
-    let import = mk_std(cx);
+    let mut items = vec![mk_std(cx)];
 
     // A constant vector of test descriptors.
-    let tests = mk_tests(cx);
+    items.extend(mk_tests(cx));
 
     // The synthesized main function which will call the console test runner
     // with our list of tests
-    let mainfn = mk_main(cx);
+    items.push(mk_main(cx));
 
     let testmod = ast::Mod {
         inner: DUMMY_SP,
-        items: vec![import, mainfn, tests],
+        items: items,
     };
     let item_ = ast::ItemKind::Mod(testmod);
     let mod_ident = Ident::with_empty_ctxt(Symbol::gensym("__test"));
@@ -629,53 +631,39 @@ fn path_name_i(idents: &[Ident]) -> String {
     idents.iter().map(|i| i.to_string()).collect::<Vec<String>>().join("::")
 }
 
-fn mk_tests(cx: &TestCtxt) -> P<ast::Item> {
+fn mk_tests(cx: &TestCtxt) -> Vec<P<ast::Item>> {
     // The vector of test_descs for this crate
-    let test_descs = mk_test_descs(cx);
+    let (test_descs, mut test_wrappers) = mk_test_descs(cx);
+    let mut test_descs_array =
+        vec![TokenTree::Token(DUMMY_SP, token::Token::OpenDelim(token::DelimToken::Bracket))];
 
-    // FIXME #15962: should be using quote_item, but that stringifies
-    // __test_reexports, causing it to be reinterned, losing the
-    // gensym information.
-    let sp = ignored_span(cx, DUMMY_SP);
-    let ecx = &cx.ext_cx;
-    let struct_type = ecx.ty_path(ecx.path(sp, vec![ecx.ident_of("self"),
-                                                    ecx.ident_of("test"),
-                                                    ecx.ident_of("TestDescAndFn")]));
-    let static_lt = ecx.lifetime(sp, keywords::StaticLifetime.ident());
-    // &'static [self::test::TestDescAndFn]
-    let static_type = ecx.ty_rptr(sp,
-                                  ecx.ty(sp, ast::TyKind::Slice(struct_type)),
-                                  Some(static_lt),
-                                  ast::Mutability::Immutable);
-    // static TESTS: $static_type = &[...];
-    ecx.item_const(sp,
-                   ecx.ident_of("TESTS"),
-                   static_type,
-                   test_descs)
+    for (i, test_desc) in test_descs.iter().enumerate() {
+        if i > 0 {
+            test_descs_array.push(TokenTree::Token(DUMMY_SP, token::Token::Comma));
+        }
+        test_descs_array.extend(test_desc.to_tokens(&cx.ext_cx));
+    }
+
+    test_descs_array.push(
+        TokenTree::Token(DUMMY_SP, token::Token::CloseDelim(token::DelimToken::Bracket)));
+
+    let tests =
+        quote_item!(&cx.ext_cx,
+                    static TESTS: &'static [self::test::TestDescAndFn] = &$test_descs_array;);
+
+    test_wrappers.push(tests.unwrap());
+    test_wrappers
 }
 
-fn mk_test_descs(cx: &TestCtxt) -> P<ast::Expr> {
+fn mk_test_descs(cx: &TestCtxt) -> (Vec<P<ast::Expr>>, Vec<P<ast::Item>>) {
     debug!("building test vector from {} tests", cx.testfns.len());
 
-    let (test_descs, _test_wrappers) = cx.testfns.iter().map(|test| {
+    cx.testfns.iter().map(|test| {
         mk_test_desc_and_fn_rec(cx, test)
     }).fold((Vec::new(), Vec::new()), |(mut tdescs, mut twrappers), (tdesc, twrapper)| {
         tdescs.push(tdesc);
         twrappers.push(twrapper);
         (tdescs, twrappers)
-    });
-
-    P(ast::Expr {
-        id: ast::DUMMY_NODE_ID,
-        node: ast::ExprKind::AddrOf(ast::Mutability::Immutable,
-            P(ast::Expr {
-                id: ast::DUMMY_NODE_ID,
-                node: ast::ExprKind::Array(test_descs),
-                span: DUMMY_SP,
-                attrs: ast::ThinVec::new(),
-            })),
-        span: DUMMY_SP,
-        attrs: ast::ThinVec::new(),
     })
 }
 
@@ -702,11 +690,13 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
         }
     };
 
+    let ignore = test.ignore;
+    let allow_fail = test.allow_fail;
     let desc_expr = quote_expr!(ecx, self::test::TestDesc {
         name: self::test::TestName::StaticTestName($test_fn_name),
-        ignore: $(test.ignore),
+        ignore: $ignore,
         should_panic: $fail_expr,
-        allow_fail: $(test.allow_fail),
+        allow_fail: $allow_fail,
     });
 
     let mut visible_path = match cx.toplevel_reexport {
@@ -734,8 +724,8 @@ fn mk_test_desc_and_fn_rec(cx: &TestCtxt, test: &Test) -> (P<ast::Expr>, P<ast::
     let variant_name = Ident::from_str(if test.bench { "StaticBenchFn" } else { "StaticTestFn" });
     let test_desc_and_fn = quote_expr!(ecx, self::test::TestDescAndFn {
         desc: $desc_expr,
-        testfn: $variant_name($test_fn_wrapper_name),
+        testfn: self::test::$variant_name($test_fn_wrapper_name),
     });
 
-    (test_desc_and_fn, test_fn_wrapper.expect("LAST UNWRAP"))
+    (test_desc_and_fn, test_fn_wrapper.unwrap())
 }
